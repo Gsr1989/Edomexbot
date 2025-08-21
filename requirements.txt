@@ -1,0 +1,7 @@
+fastapi
+aiogram
+supabase
+PyMuPDF==1.21.1
+uvicorn
+python-multipart
+aiohttp
