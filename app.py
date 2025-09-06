@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from supabase import create_client, Client
@@ -819,6 +820,39 @@ async def bot_status():
         }
     except Exception as e:
         return {"bot_active": False, "error": str(e)}
+
+# Agregar después de las otras rutas de FastAPI, antes del if __name__ == '__main__':
+
+@app.get("/consulta/{folio}")
+async def consulta_qr(folio: str):
+    from fastapi.responses import HTMLResponse
+    
+    folio = folio.strip().upper()
+    
+    try:
+        resp = supabase.table("folios_registrados").select("*").eq("folio", folio).execute()
+        
+        if not resp.data:
+            html = f"<h1>Folio {folio} no encontrado</h1>"
+            return HTMLResponse(content=html)
+        
+        reg = resp.data[0]
+        fe = datetime.fromisoformat(reg['fecha_expedicion'])
+        fv = datetime.fromisoformat(reg['fecha_vencimiento'])
+        estado = "VIGENTE" if datetime.now() <= fv else "VENCIDO"
+        
+        html = f"""
+        <h1>Permiso EDOMEX</h1>
+        <p>Folio: {folio}</p>
+        <p>Estado: {estado}</p>
+        <p>Marca: {reg['marca']}</p>
+        <p>Serie: {reg['numero_serie']}</p>
+        <p>Vigencia: {fv.strftime("%d/%m/%Y")}</p>
+        """
+        return HTMLResponse(content=html)
+        
+    except:
+        return HTMLResponse(content=f"<h1>Error consultando folio {folio}</h1>")
 
 if __name__ == '__main__':
     import uvicorn
