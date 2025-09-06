@@ -221,7 +221,7 @@ class PermisoForm(StatesGroup):
     nombre = State()
 
 # URL de consulta para QRs
-URL_CONSULTA_BASE = "https://semovidigitalgob.onrender.com" 
+URL_CONSULTA_BASE = "https://sfpyaedomexicoconsultapermisodigital.onrender.com"
 
 def generar_qr_dinamico_edomex(folio):
     """Genera QR dinámico para Estado de México"""
