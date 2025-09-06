@@ -181,28 +181,28 @@ coords_edomex = {
     "nombre": (394,320,10,(0,0,0)),
 }
 
-# ------------ FUNCIÓN GENERAR FOLIO EDOMEX CON PREFIJO 98 ------------
+# ------------ FUNCIÓN GENERAR FOLIO EDOMEX CON PREFIJO 98100 ------------
 def generar_folio_edomex():
     """Genera folio con prefijo 98 para Estado de México"""
     try:
-        # Buscar el último folio que comience con 98
+        # Buscar el último folio que comience con 98100
         response = supabase.table("folios_registrados") \
             .select("folio") \
             .eq("entidad", ENTIDAD) \
-            .like("folio", "98%") \
+            .like("folio", "98100%") \
             .order("folio", desc=True) \
             .limit(1) \
             .execute()
 
         if response.data:
             ultimo_folio = response.data[0]["folio"]
-            if isinstance(ultimo_folio, str) and ultimo_folio.startswith("98"):
-                numero = int(ultimo_folio[2:])  # Quitar el prefijo 98
+            if isinstance(ultimo_folio, str) and ultimo_folio.startswith("98100"):
+                numero = int(ultimo_folio[2:])  # Quitar el prefijo 98100
                 nuevo_numero = numero + 1
-                return f"98{nuevo_numero}"
+                return f"98100{nuevo_numero}"
         
-        # Si no hay folios, empezar desde 981
-        return "981"
+        # Si no hay folios, empezar desde 98100
+        return "98100"
         
     except Exception as e:
         print(f"[ERROR] Al generar folio EDOMEX: {e}")
@@ -316,10 +316,10 @@ def generar_pdf_principal(datos: dict) -> str:
         qr_pix = fitz.Pixmap(buf.read())
 
         # Coordenadas del QR para EDOMEX (ajustar según tu PDF)
-        x_qr = 50  
-        y_qr = 350
-        ancho_qr = 80
-        alto_qr = 80
+        x_qr = 100  
+        y_qr = 100
+        ancho_qr = 82
+        alto_qr = 82
 
         pg.insert_image(
             fitz.Rect(x_qr, y_qr, x_qr + ancho_qr, y_qr + alto_qr),
