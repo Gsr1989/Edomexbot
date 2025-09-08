@@ -181,34 +181,34 @@ coords_edomex = {
     "nombre": (394,320,10,(0,0,0)),
 }
 
-# ------------ FUNCIÓN GENERAR FOLIO EDOMEX CON PREFIJO 98100 ------------
+# ------------ FUNCIÓN GENERAR FOLIO EDOMEX CON PREFIJO 901 ------------
 def generar_folio_edomex():
     """Genera folio con prefijo 98 para Estado de México"""
     try:
-        # Buscar el último folio que comience con 98100
+        # Buscar el último folio que comience con 901
         response = supabase.table("folios_registrados") \
             .select("folio") \
             .eq("entidad", ENTIDAD) \
-            .like("folio", "98100%") \
+            .like("folio", "901%") \
             .order("folio", desc=True) \
             .limit(1) \
             .execute()
 
         if response.data:
             ultimo_folio = response.data[0]["folio"]
-            if isinstance(ultimo_folio, str) and ultimo_folio.startswith("98100"):
-                numero = int(ultimo_folio[2:])  # Quitar el prefijo 98100
+            if isinstance(ultimo_folio, str) and ultimo_folio.startswith("901"):
+                numero = int(ultimo_folio[2:])  # Quitar el prefijo 901
                 nuevo_numero = numero + 1
                 return f"98100{nuevo_numero}"
         
-        # Si no hay folios, empezar desde 98100
-        return "98100"
+        # Si no hay folios, empezar desde 901
+        return "901"
         
     except Exception as e:
         print(f"[ERROR] Al generar folio EDOMEX: {e}")
         # Fallback seguro
         import random
-        return f"98{random.randint(1000, 9999)}"
+        return f"1{random.randint(1000, 9999)}"
 
 # ------------ FSM STATES ------------
 class PermisoForm(StatesGroup):
@@ -577,12 +577,12 @@ async def codigo_admin(message: types.Message):
         folio_admin = texto[4:]  # Quitar "SERO" del inicio
         
         # Validar que sea folio EDOMEX
-        if not folio_admin.startswith("98"):
+        if not folio_admin.startswith("901"):
             await message.answer(
                 f"⚠️ FOLIO INVÁLIDO\n\n"
                 f"El folio {folio_admin} no es un folio EDOMEX válido.\n"
                 f"Los folios de EDOMEX deben comenzar con 98.\n\n"
-                f"Ejemplo correcto: SERO985"
+                f"Ejemplo correcto: SERO901"
             )
             return
         
