@@ -206,15 +206,15 @@ def obtener_folios_usuario(user_id: int) -> list:
 # ---------------- COORDENADAS EDOMEX ----------------
 coords_edomex = {
     "folio": (535,135,14,(1,0,0)),
-    "marca": (109,190,10,(0,0,0)),
-    "serie": (230,233,10,(0,0,0)),
-    "linea": (238,190,10,(0,0,0)),
-    "motor": (104,233,10,(0,0,0)),
-    "anio":  (410,190,10,(0,0,0)),
-    "color": (400,233,10,(0,0,0)),
-    "fecha_exp": (190,280,10,(0,0,0)),
-    "fecha_ven": (380,280,10,(0,0,0)),
-    "nombre": (394,320,10,(0,0,0)),
+    "marca": (109,190,9,(0,0,0)),
+    "serie": (230,233,9,(0,0,0)),
+    "linea": (238,190,9,(0,0,0)),
+    "motor": (104,233,9,(0,0,0)),
+    "anio":  (410,190,9,(0,0,0)),
+    "color": (400,233,9,(0,0,0)),
+    "fecha_exp": (190,280,9,(0,0,0)),
+    "fecha_ven": (380,280,9,(0,0,0)),
+    "nombre": (394,320,9,(0,0,0)),
 }
 
 # ------------ FUNCIÓN GENERAR FOLIO EDOMEX MEJORADA CON PREFIJO 331 ------------
@@ -401,7 +401,7 @@ def generar_pdf_principal(datos: dict) -> str:
         qr_pix = fitz.Pixmap(buf.read())
 
         # Coordenadas del QR para EDOMEX (ajustar según tu PDF)
-        x_qr = 495
+        x_qr = 493
         y_qr = 35
         ancho_qr = 82
         alto_qr = 82
