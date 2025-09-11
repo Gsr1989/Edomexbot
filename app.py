@@ -934,68 +934,6 @@ async def bot_status():
     except Exception as e:
         return {"bot_active": False, "error": str(e)}
 
-@app.get("/consulta/{folio}")
-async def consulta_qr(folio: str):
-    folio = folio.strip().upper()
-    
-    try:
-        resp = supabase.table("folios_registrados").select("*").eq("folio", folio).execute()
-        
-        if not resp.data:
-            html = f"<h1>Folio {folio} no encontrado</h1>"
-            return HTMLResponse(content=html)
-        
-        reg = resp.data[0]
-        fe = datetime.fromisoformat(reg['fecha_expedicion'])
-        fv = datetime.fromisoformat(reg['fecha_vencimiento'])
-        estado = "VIGENTE" if datetime.now() <= fv else "VENCIDO"
-        
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Permiso EDOMEX - {folio}</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                .container {{ max-width: 600px; margin: 0 auto; }}
-                .header {{ background: #2E8B57; color: white; padding: 20px; text-align: center; }}
-                .content {{ padding: 20px; border: 1px solid #ddd; }}
-                .status {{ padding: 10px; margin: 10px 0; text-align: center; font-weight: bold; }}
-                .vigente {{ background: #d4edda; color: #155724; }}
-                .vencido {{ background: #f8d7da; color: #721c24; }}
-                .info {{ margin: 10px 0; }}
-                .label {{ font-weight: bold; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>PERMISO EDOMEX</h1>
-                    <h2>Sistema Digital</h2>
-                </div>
-                <div class="content">
-                    <div class="status {'vigente' if estado == 'VIGENTE' else 'vencido'}">
-                        {estado}
-                    </div>
-                    <div class="info"><span class="label">Folio:</span> {folio}</div>
-                    <div class="info"><span class="label">Marca:</span> {reg['marca']}</div>
-                    <div class="info"><span class="label">Línea:</span> {reg['linea']}</div>
-                    <div class="info"><span class="label">Año:</span> {reg['anio']}</div>
-                    <div class="info"><span class="label">Serie:</span> {reg['numero_serie']}</div>
-                    <div class="info"><span class="label">Motor:</span> {reg['numero_motor']}</div>
-                    <div class="info"><span class="label">Expedición:</span> {fe.strftime("%d/%m/%Y")}</div>
-                    <div class="info"><span class="label">Vencimiento:</span> {fv.strftime("%d/%m/%Y")}</div>
-                    <div class="info"><span class="label">Entidad:</span> EDOMEX</div>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        return HTMLResponse(content=html)
-        
-    except Exception as e:
-        return HTMLResponse(content=f"<h1>Error consultando folio {folio}</h1><p>{str(e)}</p>")
-
 if __name__ == '__main__':
     import uvicorn
     port = int(os.getenv("PORT", 8000))
