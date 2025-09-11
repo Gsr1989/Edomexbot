@@ -401,8 +401,8 @@ def generar_pdf_principal(datos: dict) -> str:
         qr_pix = fitz.Pixmap(buf.read())
 
         # Coordenadas del QR para EDOMEX (ajustar según tu PDF)
-        x_qr = 280
-        y_qr = 100
+        x_qr = 380
+        y_qr = 70
         ancho_qr = 82
         alto_qr = 82
 
