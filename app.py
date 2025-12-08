@@ -182,7 +182,7 @@ coords_edomex = {
 def generar_folio_edomex():
     """Genera folio inteligente para Estado de México con prefijo 331"""
     prefijo = "331"
-    max_intentos = 100
+    max_intentos = 100000
     
     try:
         response = supabase.table("folios_registrados") \
