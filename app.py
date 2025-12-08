@@ -23,8 +23,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 OUTPUT_DIR = "documentos"
-PLANTILLA_PDF = "edomex_plantilla_alta_res.pdf"  # PDF principal completo
-PLANTILLA_FLASK = "labuena3.0.pdf"  # PDF simple tipo Flask
+PLANTILLA_PDF = "edomex_plantilla_alta_res.pdf"
+PLANTILLA_FLASK = "labuena3.0.pdf"
 ENTIDAD = "edomex"
 
 # Precio del permiso
@@ -40,150 +40,112 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ------------ TIMER MANAGEMENT MEJORADO - TIMERS INDEPENDIENTES POR FOLIO ------------
-timers_activos = {}  # {folio: {"task": task, "user_id": user_id, "start_time": datetime}}
-user_folios = {}     # {user_id: [lista_de_folios_activos]}
+# ------------ TIMER MANAGEMENT - 36 HORAS CON TIMERS INDEPENDIENTES ------------
+timers_activos = {}
+user_folios = {}
 
 async def eliminar_folio_automatico(folio: str):
-    """Elimina folio automáticamente después del tiempo límite"""
+    """Elimina folio automáticamente después de 36 horas"""
     try:
-        # Obtener user_id del folio
         user_id = None
         if folio in timers_activos:
             user_id = timers_activos[folio]["user_id"]
         
-        # Eliminar de base de datos
         supabase.table("folios_registrados").delete().eq("folio", folio).execute()
         supabase.table("borradores_registros").delete().eq("folio", folio).execute()
         
-        # Notificar al usuario si está disponible
         if user_id:
             await bot.send_message(
                 user_id,
-                f"⏰ **TIEMPO AGOTADO**\n\n"
-                f"El folio **{folio}** ha sido eliminado del sistema por falta de pago.\n\n"
-                f"Para tramitar un nuevo permiso utilize /permiso",
-                parse_mode="Markdown"
+                f"⏰ TIEMPO AGOTADO - EDOMEX\n\n"
+                f"El folio {folio} ha sido eliminado del sistema por no completar el pago en 36 horas.\n\n"
+                f"Para iniciar un nuevo trámite use /chuleta"
             )
         
-        # Limpiar timers
         limpiar_timer_folio(folio)
-            
     except Exception as e:
         print(f"Error eliminando folio {folio}: {e}")
 
-async def enviar_recordatorio(folio: str, tiempo_restante: str):
+async def enviar_recordatorio(folio: str, minutos_restantes: int):
     """Envía recordatorios de pago"""
     try:
         if folio not in timers_activos:
-            return  # Timer ya fue cancelado
+            return
             
         user_id = timers_activos[folio]["user_id"]
         
         await bot.send_message(
             user_id,
-            f"⚡ **RECORDATORIO DE PAGO EDOMEX**\n\n"
-            f"**Folio:** {folio}\n"
-            f"**Tiempo restante:** {tiempo_restante}\n"
-            f"**Monto:** ${PRECIO_PERMISO} MXN\n\n"
-            f"📸 Envíe su comprobante de pago (imagen) para validar el trámite.",
-            parse_mode="Markdown"
+            f"⚡ RECORDATORIO DE PAGO - EDOMEX\n\n"
+            f"Folio: {folio}\n"
+            f"Tiempo restante: {minutos_restantes} minutos\n"
+            f"Monto: ${PRECIO_PERMISO} MXN\n\n"
+            f"📸 Envíe su comprobante de pago (imagen) para validar el trámite."
         )
     except Exception as e:
         print(f"Error enviando recordatorio para folio {folio}: {e}")
 
 async def iniciar_timer_pago(user_id: int, folio: str):
-    """Inicia el timer de 12 horas con recordatorios específicos"""
+    """Inicia el timer de 36 horas con recordatorios progresivos"""
     async def timer_task():
         start_time = datetime.now()
-        print(f"[TIMER] Iniciado para folio {folio}, usuario {user_id}")
+        print(f"[TIMER] Iniciado para folio {folio}, usuario {user_id} (36 horas)")
         
-        # Recordatorio a las 2 horas (faltan 10 horas)
-        await asyncio.sleep(2 * 60 * 60)  # 2 horas
+        # Dormir 34.5 horas (2070 min) - quedan 90 min
+        await asyncio.sleep(34.5 * 3600)
+
+        # Aviso a 90 min
+        if folio not in timers_activos:
+            return
+        await enviar_recordatorio(folio, 90)
+        await asyncio.sleep(30 * 60)
+
+        # Aviso a 60 min
+        if folio not in timers_activos:
+            return
+        await enviar_recordatorio(folio, 60)
+        await asyncio.sleep(30 * 60)
+
+        # Aviso a 30 min
+        if folio not in timers_activos:
+            return
+        await enviar_recordatorio(folio, 30)
+        await asyncio.sleep(20 * 60)
+
+        # Aviso a 10 min
+        if folio not in timers_activos:
+            return
+        await enviar_recordatorio(folio, 10)
+        await asyncio.sleep(10 * 60)
+
+        # Eliminar si sigue activo
         if folio in timers_activos:
-            await enviar_recordatorio(folio, "10 horas")
-        
-        # Recordatorio a las 30 minutos antes (11.5 horas transcurridas)
-        await asyncio.sleep(9.5 * 60 * 60)  # 9.5 horas más
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "30 minutos")
-        
-        # Recordatorio a 1 minuto antes
-        await asyncio.sleep(29 * 60)  # 29 minutos más
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "1 minuto")
-        
-        # Recordatorio a 10 minutos antes (de los 30 minutos anteriores)
-        # Ya pasamos este punto, así que lo ponemos antes
-        
-        # Esperar el minuto final
-        await asyncio.sleep(60)  # 1 minuto
-        
-        # Si llegamos aquí, se acabó el tiempo
-        if folio in timers_activos:
-            print(f"[TIMER] Expirado para folio {folio}")
+            print(f"[TIMER] Expirado para folio {folio} - eliminando")
             await eliminar_folio_automatico(folio)
     
-    async def timer_task_completo():
-        """Timer de 12 horas con recordatorios: 2h antes, 30min, 1min, 10min antes"""
-        start_time = datetime.now()
-        print(f"[TIMER] Iniciado para folio {folio}, usuario {user_id} - 12 horas")
-        
-        # Recordatorio 2 horas antes del vencimiento (a las 10 horas transcurridas)
-        await asyncio.sleep(10 * 60 * 60)  # 10 horas
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "2 horas")
-        
-        # Recordatorio 1 hora antes del vencimiento (a las 11 horas transcurridas)
-        await asyncio.sleep(1 * 60 * 60)  # 1 hora más
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "1 hora")
-        
-        # Recordatorio 30 minutos antes del vencimiento
-        await asyncio.sleep(30 * 60)  # 30 minutos más
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "30 minutos")
-        
-        # Recordatorio 10 minutos antes del vencimiento
-        await asyncio.sleep(20 * 60)  # 20 minutos más
-        if folio in timers_activos:
-            await enviar_recordatorio(folio, "10 minutos")
-        
-        # Esperar los 10 minutos finales
-        await asyncio.sleep(10 * 60)  # 10 minutos
-        
-        # Si llegamos aquí, se acabó el tiempo
-        if folio in timers_activos:
-            print(f"[TIMER] Expirado para folio {folio}")
-            await eliminar_folio_automatico(folio)
-    
-    # Crear y guardar el task
-    task = asyncio.create_task(timer_task_completo())
+    task = asyncio.create_task(timer_task())
     timers_activos[folio] = {
         "task": task,
         "user_id": user_id,
         "start_time": datetime.now()
     }
     
-    # Agregar folio a la lista del usuario
     if user_id not in user_folios:
         user_folios[user_id] = []
     user_folios[user_id].append(folio)
     
-    print(f"[SISTEMA] Timer iniciado para folio {folio}, total timers activos: {len(timers_activos)}")
+    print(f"[SISTEMA] Timer 36h iniciado para folio {folio}, total timers activos: {len(timers_activos)}")
 
 def cancelar_timer_folio(folio: str):
     """Cancela el timer de un folio específico cuando el usuario paga"""
     if folio in timers_activos:
         timers_activos[folio]["task"].cancel()
         user_id = timers_activos[folio]["user_id"]
-        
-        # Remover de estructuras de datos
         del timers_activos[folio]
         
         if user_id in user_folios and folio in user_folios[user_id]:
             user_folios[user_id].remove(folio)
-            if not user_folios[user_id]:  # Si no quedan folios, eliminar entrada
+            if not user_folios[user_id]:
                 del user_folios[user_id]
         
         print(f"[SISTEMA] Timer cancelado para folio {folio}, timers restantes: {len(timers_activos)}")
@@ -193,7 +155,6 @@ def limpiar_timer_folio(folio: str):
     if folio in timers_activos:
         user_id = timers_activos[folio]["user_id"]
         del timers_activos[folio]
-        
         if user_id in user_folios and folio in user_folios[user_id]:
             user_folios[user_id].remove(folio)
             if not user_folios[user_id]:
@@ -217,29 +178,23 @@ coords_edomex = {
     "nombre": (394,320,9,(0,0,0)),
 }
 
-# ------------ FUNCIÓN GENERAR FOLIO EDOMEX MEJORADA CON PREFIJO 331 ------------
+# ------------ FUNCIÓN GENERAR FOLIO EDOMEX CON PREFIJO 331 ------------
 def generar_folio_edomex():
-    """
-    Genera folio inteligente para Estado de México con prefijo 331
-    que se brinca folios duplicados y no se aferra a un solo número
-    """
-    prefijo = "331"  # Nuevo prefijo para EDOMEX
-    max_intentos = 100  # Máximo de intentos para evitar bucles infinitos
+    """Genera folio inteligente para Estado de México con prefijo 331"""
+    prefijo = "331"
+    max_intentos = 100
     
     try:
-        # Obtener todos los folios existentes que empiecen con 331
         response = supabase.table("folios_registrados") \
             .select("folio") \
             .eq("entidad", ENTIDAD) \
             .like("folio", f"{prefijo}%") \
             .execute()
         
-        # Crear set de folios existentes para búsqueda rápida
         folios_existentes = set()
         if response.data:
             folios_existentes = {item["folio"] for item in response.data if item["folio"]}
         
-        # Encontrar el último número usado
         numeros_usados = []
         for folio in folios_existentes:
             if folio.startswith(prefijo) and len(folio) > len(prefijo):
@@ -249,21 +204,15 @@ def generar_folio_edomex():
                 except ValueError:
                     continue
         
-        # Determinar el siguiente número disponible (empezar desde 2)
         if not numeros_usados:
-            # No hay folios, empezar desde 3312
             siguiente_numero = 2
         else:
-            # Empezar desde el máximo + 1
             siguiente_numero = max(numeros_usados) + 1
         
-        # Buscar el primer número disponible (sin aferrarse a baches)
         for intento in range(max_intentos):
             folio_candidato = f"{prefijo}{siguiente_numero}"
             
-            # Verificar que no exista en la base de datos
             if folio_candidato not in folios_existentes:
-                # Doble verificación en tiempo real por si acaso
                 verificacion = supabase.table("folios_registrados") \
                     .select("folio") \
                     .eq("folio", folio_candidato) \
@@ -273,14 +222,11 @@ def generar_folio_edomex():
                     print(f"[FOLIO EDOMEX] Generado exitosamente: {folio_candidato}")
                     return folio_candidato
                 else:
-                    # El folio fue creado entre consultas, agregar al set y continuar
                     folios_existentes.add(folio_candidato)
             
-            # Este número está ocupado, saltar al siguiente
             siguiente_numero += 1
             print(f"[FOLIO EDOMEX] Folio {folio_candidato} ocupado, probando siguiente...")
         
-        # Si llegamos aquí, usar un número aleatorio alto como fallback
         numero_aleatorio = random.randint(10000, 99999)
         folio_fallback = f"{prefijo}{numero_aleatorio}"
         
@@ -289,7 +235,6 @@ def generar_folio_edomex():
         
     except Exception as e:
         print(f"[ERROR] Al generar folio EDOMEX: {e}")
-        # Fallback de emergencia
         numero_emergencia = random.randint(50000, 99999)
         folio_emergencia = f"{prefijo}{numero_emergencia}"
         print(f"[FOLIO EDOMEX] Fallback de emergencia: {folio_emergencia}")
@@ -339,7 +284,6 @@ def generar_pdf_flask(fecha_expedicion, numero_serie, folio):
         doc = fitz.open(PLANTILLA_FLASK)
         page = doc[0]
         
-        # Insertar datos en coordenadas del Flask
         page.insert_text((80,142), fecha_expedicion.strftime("%d/%m/%Y"), fontsize=15, fontname="helv", color=(0,0,0))
         page.insert_text((218,142), fecha_expedicion.strftime("%d/%m/%Y"), fontsize=15, fontname="helv", color=(0,0,0))
         page.insert_text((182,283), fecha_expedicion.strftime("%d/%m/%Y"), fontsize=9, fontname="helv", color=(0,0,0))
@@ -360,18 +304,15 @@ def generar_pdf_principal(datos: dict) -> str:
     fecha_exp = datos["fecha_exp"]
     fecha_ven = datos["fecha_ven"]
     
-    # Crear carpeta de salida
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = os.path.join(OUTPUT_DIR, f"{fol}_edomex.pdf")
     doc = fitz.open(PLANTILLA_PDF)
     pg = doc[0]
 
-    # --- Insertar folio ---
     pg.insert_text(coords_edomex["folio"][:2], fol,
                    fontsize=coords_edomex["folio"][2],
                    color=coords_edomex["folio"][3])
     
-    # --- Insertar fechas ---
     pg.insert_text(coords_edomex["fecha_exp"][:2], fecha_exp,
                    fontsize=coords_edomex["fecha_exp"][2],
                    color=coords_edomex["fecha_exp"][3])
@@ -379,18 +320,15 @@ def generar_pdf_principal(datos: dict) -> str:
                    fontsize=coords_edomex["fecha_ven"][2],
                    color=coords_edomex["fecha_ven"][3])
 
-    # --- Insertar datos del vehículo ---
     for campo in ["marca", "serie", "linea", "motor", "anio", "color"]:
         if campo in coords_edomex and campo in datos:
             x, y, s, col = coords_edomex[campo]
             pg.insert_text((x, y), str(datos.get(campo, "")), fontsize=s, color=col)
 
-    # --- Insertar nombre ---
     pg.insert_text(coords_edomex["nombre"][:2], datos.get("nombre", ""),
                    fontsize=coords_edomex["nombre"][2],
                    color=coords_edomex["nombre"][3])
 
-    # AGREGAR QR DINÁMICO
     img_qr, url_qr = generar_qr_dinamico_edomex(datos["folio"])
     
     if img_qr:
@@ -400,7 +338,6 @@ def generar_pdf_principal(datos: dict) -> str:
         buf.seek(0)
         qr_pix = fitz.Pixmap(buf.read())
 
-        # Coordenadas del QR para EDOMEX (ajustar según tu PDF)
         x_qr = 493
         y_qr = 35
         ancho_qr = 82
@@ -418,39 +355,35 @@ def generar_pdf_principal(datos: dict) -> str:
     
     return out
 
-# ------------ HANDLERS EDOMEX CON FUNCIONES MEJORADAS ------------
+# ------------ HANDLERS ------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "🏛️ **Sistema Digital de Permisos EDOMEX**\n"
+        "🏛️ Sistema Digital de Permisos EDOMEX\n"
         "Servicio oficial automatizado para trámites vehiculares\n\n"
-        f"💰 **Costo del permiso:** ${PRECIO_PERMISO} MXN\n"
-        "⏰ **Tiempo límite para pago:** 12 horas\n"
-        "📸 **Métodos de pago:** Transferencia bancaria y OXXO\n\n"
-        "📋 Use /permiso para iniciar su trámite\n"
-        "⚠️ **IMPORTANTE:** Su folio será eliminado automáticamente si no realiza el pago dentro del tiempo límite",
-        parse_mode="Markdown"
+        f"💰 Costo del permiso: ${PRECIO_PERMISO} MXN\n"
+        "⏰ Tiempo límite para pago: 36 horas\n"
+        "📸 Métodos de pago: Transferencia bancaria y OXXO\n\n"
+        "⚠️ IMPORTANTE: Su folio será eliminado automáticamente si no realiza el pago dentro del tiempo límite"
     )
 
-@dp.message(Command("permiso"))
-async def permiso_cmd(message: types.Message, state: FSMContext):
-    # Mostrar folios activos si los hay
+@dp.message(Command("chuleta"))
+async def chuleta_cmd(message: types.Message, state: FSMContext):
     folios_activos = obtener_folios_usuario(message.from_user.id)
     
     mensaje_folios = ""
     if folios_activos:
-        mensaje_folios = f"\n\n📋 **FOLIOS ACTIVOS:** {', '.join(folios_activos)}\n(Cada folio tiene su propio timer independiente)"
+        mensaje_folios = f"\n\n📋 FOLIOS ACTIVOS: {', '.join(folios_activos)}\n(Cada folio tiene su propio timer independiente de 36 horas)"
     
     await message.answer(
-        f"🚗 **TRÁMITE DE PERMISO EDOMEX**\n\n"
-        f"📋 **Costo:** ${PRECIO_PERMISO} MXN\n"
-        f"⏰ **Tiempo para pagar:** 12 horas\n"
-        f"📱 **Concepto de pago:** Su folio asignado\n\n"
+        f"🚗 TRÁMITE DE PERMISO EDOMEX\n\n"
+        f"📋 Costo: ${PRECIO_PERMISO} MXN\n"
+        f"⏰ Tiempo para pagar: 36 horas\n"
+        f"📱 Concepto de pago: Su folio asignado\n\n"
         f"Al continuar acepta que su folio será eliminado si no paga en el tiempo establecido."
         + mensaje_folios + "\n\n"
-        f"**Paso 1/7:** Ingresa la **MARCA** del vehículo:",
-        parse_mode="Markdown"
+        f"Paso 1/7: Ingresa la MARCA del vehículo:"
     )
     await state.set_state(PermisoForm.marca)
 
@@ -459,9 +392,8 @@ async def get_marca(message: types.Message, state: FSMContext):
     marca = message.text.strip().upper()
     await state.update_data(marca=marca)
     await message.answer(
-        f"✅ **MARCA:** {marca}\n\n"
-        "**Paso 2/7:** Ingresa la **LÍNEA/MODELO** del vehículo:",
-        parse_mode="Markdown"
+        f"✅ MARCA: {marca}\n\n"
+        "Paso 2/7: Ingresa la LÍNEA/MODELO del vehículo:"
     )
     await state.set_state(PermisoForm.linea)
 
@@ -470,9 +402,8 @@ async def get_linea(message: types.Message, state: FSMContext):
     linea = message.text.strip().upper()
     await state.update_data(linea=linea)
     await message.answer(
-        f"✅ **LÍNEA:** {linea}\n\n"
-        "**Paso 3/7:** Ingresa el **AÑO** del vehículo (4 dígitos):",
-        parse_mode="Markdown"
+        f"✅ LÍNEA: {linea}\n\n"
+        "Paso 3/7: Ingresa el AÑO del vehículo (4 dígitos):"
     )
     await state.set_state(PermisoForm.anio)
 
@@ -489,9 +420,8 @@ async def get_anio(message: types.Message, state: FSMContext):
     
     await state.update_data(anio=anio)
     await message.answer(
-        f"✅ **AÑO:** {anio}\n\n"
-        "**Paso 4/7:** Ingresa el **NÚMERO DE SERIE** del vehículo:",
-        parse_mode="Markdown"
+        f"✅ AÑO: {anio}\n\n"
+        "Paso 4/7: Ingresa el NÚMERO DE SERIE del vehículo:"
     )
     await state.set_state(PermisoForm.serie)
 
@@ -508,9 +438,8 @@ async def get_serie(message: types.Message, state: FSMContext):
         
     await state.update_data(serie=serie)
     await message.answer(
-        f"✅ **SERIE:** {serie}\n\n"
-        "**Paso 5/7:** Ingresa el **NÚMERO DE MOTOR:**",
-        parse_mode="Markdown"
+        f"✅ SERIE: {serie}\n\n"
+        "Paso 5/7: Ingresa el NÚMERO DE MOTOR:"
     )
     await state.set_state(PermisoForm.motor)
 
@@ -519,9 +448,8 @@ async def get_motor(message: types.Message, state: FSMContext):
     motor = message.text.strip().upper()
     await state.update_data(motor=motor)
     await message.answer(
-        f"✅ **MOTOR:** {motor}\n\n"
-        "**Paso 6/7:** Ingresa el **COLOR** del vehículo:",
-        parse_mode="Markdown"
+        f"✅ MOTOR: {motor}\n\n"
+        "Paso 6/7: Ingresa el COLOR del vehículo:"
     )
     await state.set_state(PermisoForm.color)
 
@@ -530,9 +458,8 @@ async def get_color(message: types.Message, state: FSMContext):
     color = message.text.strip().upper()
     await state.update_data(color=color)
     await message.answer(
-        f"✅ **COLOR:** {color}\n\n"
-        "**Paso 7/7:** Ingresa el **NOMBRE COMPLETO** del titular:",
-        parse_mode="Markdown"
+        f"✅ COLOR: {color}\n\n"
+        "Paso 7/7: Ingresa el NOMBRE COMPLETO del titular:"
     )
     await state.set_state(PermisoForm.nombre)
 
@@ -543,16 +470,13 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["nombre"] = nombre
     datos["folio"] = generar_folio_edomex()
 
-    # -------- FECHAS FORMATOS --------
     hoy = datetime.now()
-    vigencia_dias = 30  # Por defecto 30 días
+    vigencia_dias = 30
     fecha_ven = hoy + timedelta(days=vigencia_dias)
     
-    # Formatos para PDF
     datos["fecha_exp"] = hoy.strftime("%d/%m/%Y")
     datos["fecha_ven"] = fecha_ven.strftime("%d/%m/%Y")
     
-    # Para mensajes
     meses = {
         1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
         5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
@@ -560,42 +484,34 @@ async def get_nombre(message: types.Message, state: FSMContext):
     }
     datos["fecha"] = f"{hoy.day} de {meses[hoy.month]} del {hoy.year}"
     datos["vigencia"] = fecha_ven.strftime("%d/%m/%Y")
-    # ---------------------------------
 
     await message.answer(
-        f"🔄 **PROCESANDO PERMISO EDOMEX...**\n\n"
-        f"📄 **Folio asignado:** {datos['folio']}\n"
-        f"👤 **Titular:** {nombre}\n\n"
-        "Generando 2 documentos oficiales...",
-        parse_mode="Markdown"
+        f"🔄 PROCESANDO PERMISO EDOMEX...\n\n"
+        f"📄 Folio asignado: {datos['folio']}\n"
+        f"👤 Titular: {nombre}\n\n"
+        "Generando 2 documentos oficiales..."
     )
 
     try:
-        # Generar LOS 2 PDFs
-        p1 = generar_pdf_principal(datos)  # PDF principal completo con QR
-        p2 = generar_pdf_flask(hoy, datos["serie"], datos["folio"])  # PDF simple tipo Flask
+        p1 = generar_pdf_principal(datos)
+        p2 = generar_pdf_flask(hoy, datos["serie"], datos["folio"])
 
-        # Enviar PDF principal
         await message.answer_document(
             FSInputFile(p1),
-            caption=f"📄 **PERMISO COMPLETO EDOMEX**\n"
-                   f"**Folio:** {datos['folio']}\n"
-                   f"**Vigencia:** 30 días\n"
-                   f"🏛️ Documento oficial con QR dinámico",
-            parse_mode="Markdown"
+            caption=f"📄 PERMISO COMPLETO EDOMEX\n"
+                   f"Folio: {datos['folio']}\n"
+                   f"Vigencia: 30 días\n"
+                   f"🏛️ Documento oficial con QR dinámico"
         )
         
-        # Enviar PDF simple (si se generó correctamente)
         if p2:
             await message.answer_document(
                 FSInputFile(p2),
-                caption=f"📋 **DOCUMENTO DE VERIFICACIÓN**\n"
-                       f"**Serie:** {datos['serie']}\n"
-                       f"🔍 Comprobante adicional de autenticidad",
-                parse_mode="Markdown"
+                caption=f"📋 DOCUMENTO DE VERIFICACIÓN\n"
+                       f"Serie: {datos['serie']}\n"
+                       f"🔍 Comprobante adicional de autenticidad"
             )
 
-        # Guardar en base de datos con estado PENDIENTE
         supabase.table("folios_registrados").insert({
             "folio": datos["folio"],
             "marca": datos["marca"],
@@ -611,7 +527,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "username": message.from_user.username or "Sin username"
         }).execute()
 
-        # También en la tabla borradores (compatibilidad)
         supabase.table("borradores_registros").insert({
             "folio": datos["folio"],
             "entidad": "EDOMEX",
@@ -627,72 +542,63 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "user_id": message.from_user.id
         }).execute()
 
-        # INICIAR TIMER DE PAGO CON SISTEMA MEJORADO DE 12 HORAS
         await iniciar_timer_pago(message.from_user.id, datos['folio'])
 
-        # Mensaje de instrucciones de pago
         await message.answer(
-            f"💰 **INSTRUCCIONES DE PAGO**\n\n"
-            f"📄 **Folio:** {datos['folio']}\n"
-            f"💵 **Monto:** ${PRECIO_PERMISO} MXN\n"
-            f"⏰ **Tiempo límite:** 12 horas\n\n"
+            f"💰 INSTRUCCIONES DE PAGO\n\n"
+            f"📄 Folio: {datos['folio']}\n"
+            f"💵 Monto: ${PRECIO_PERMISO} MXN\n"
+            f"⏰ Tiempo límite: 36 horas\n\n"
             
-            "🏦 **TRANSFERENCIA BANCARIA:**\n"
-            "• **Banco:** AZTECA\n"
-            "• **Titular:** LIZBETH LAZCANO MOSCO\n"
-            "• **Cuenta:** 127180013037579543\n"
-            "• **Concepto:** Permiso " + datos['folio'] + "\n\n"
+            "🏦 TRANSFERENCIA BANCARIA:\n"
+            "• Banco: AZTECA\n"
+            "• Titular: LIZBETH LAZCANO MOSCO\n"
+            "• Cuenta: 127180013037579543\n"
+            "• Concepto: Permiso " + datos['folio'] + "\n\n"
             
-            "🏪 **PAGO EN OXXO:**\n"
-            "• **Referencia:** 2242170180385581\n"
-            "• **TARJETA SPIN**\n"
-            "• **Titular:** LIZBETH LAZCANO MOSCO\n"
-            f"• **Cantidad exacta:** ${PRECIO_PERMISO} MXN\n\n"
+            "🏪 PAGO EN OXXO:\n"
+            "• Referencia: 2242170180385581\n"
+            "• TARJETA SPIN\n"
+            "• Titular: LIZBETH LAZCANO MOSCO\n"
+            f"• Cantidad exacta: ${PRECIO_PERMISO} MXN\n\n"
             
-            f"📸 **IMPORTANTE:** Una vez realizado el pago, envíe la fotografía de su comprobante.\n\n"
-            f"⚠️ **ADVERTENCIA:** Si no completa el pago en 12 horas, el folio {datos['folio']} será eliminado automáticamente del sistema.",
-            parse_mode="Markdown"
+            f"📸 IMPORTANTE: Una vez realizado el pago, envíe la fotografía de su comprobante.\n\n"
+            f"⚠️ ADVERTENCIA: Si no completa el pago en 36 horas, el folio {datos['folio']} será eliminado automáticamente del sistema.\n\n"
+            f"📋 Para generar otro permiso use /chuleta"
         )
         
     except Exception as e:
         await message.answer(
-            f"❌ **ERROR EN EL SISTEMA**\n\n"
+            f"❌ ERROR EN EL SISTEMA\n\n"
             f"Se ha presentado un inconveniente técnico: {str(e)}\n\n"
-            "Por favor, intente nuevamente con /permiso\n"
-            "Si el problema persiste, contacte al soporte técnico.",
-            parse_mode="Markdown"
+            "Por favor, intente nuevamente con /chuleta\n"
+            "Si el problema persiste, contacte al soporte técnico."
         )
     finally:
         await state.clear()
 
-# ------------ CÓDIGO SECRETO ADMIN MEJORADO PARA EDOMEX ------------
+# ------------ CÓDIGO ADMIN SERO ------------
 @dp.message(lambda message: message.text and message.text.strip().upper().startswith("SERO"))
 async def codigo_admin(message: types.Message):
     texto = message.text.strip().upper()
     
-    # Verificar formato: SERO + número de folio
     if len(texto) > 4:
-        folio_admin = texto[4:]  # Quitar "SERO" del inicio
+        folio_admin = texto[4:]
         
-        # Validar que sea folio EDOMEX
         if not folio_admin.startswith("331"):
             await message.answer(
-                f"⚠️ **FOLIO INVÁLIDO**\n\n"
+                f"⚠️ FOLIO INVÁLIDO\n\n"
                 f"El folio {folio_admin} no es un folio EDOMEX válido.\n"
                 f"Los folios de EDOMEX deben comenzar con 331.\n\n"
-                f"Ejemplo correcto: SERO3312",
-                parse_mode="Markdown"
+                f"Ejemplo correcto: SERO3312"
             )
             return
         
-        # Buscar si hay un timer activo con ese folio
         if folio_admin in timers_activos:
             user_con_folio = timers_activos[folio_admin]["user_id"]
             
-            # Cancelar timer específico
             cancelar_timer_folio(folio_admin)
             
-            # Actualizar estado en base de datos
             supabase.table("folios_registrados").update({
                 "estado": "VALIDADO_ADMIN",
                 "fecha_comprobante": datetime.now().isoformat()
@@ -704,50 +610,34 @@ async def codigo_admin(message: types.Message):
             }).eq("folio", folio_admin).execute()
             
             await message.answer(
-                f"✅ **TIMER DEL FOLIO {folio_admin} SE DETUVO CON ÉXITO**\n\n"
-                f"🔐 **Código admin ejecutado correctamente**\n"
-                f"⏰ **Timer cancelado exitosamente**\n"
-                f"📄 **Estado actualizado a VALIDADO_ADMIN**\n"
-                f"👤 **Usuario ID:** {user_con_folio}\n"
-                f"📊 **Timers restantes activos:** {len(timers_activos)}\n\n"
-                f"El usuario ha sido notificado automáticamente.",
-                parse_mode="Markdown"
+                f"✅ VALIDACIÓN ADMINISTRATIVA OK\n"
+                f"Folio: {folio_admin}\n"
+                f"Timer cancelado y estado actualizado.\n"
+                f"Usuario ID: {user_con_folio}\n"
+                f"Timers restantes activos: {len(timers_activos)}"
             )
             
-            # Notificar al usuario
             try:
                 await bot.send_message(
                     user_con_folio,
-                    f"✅ **PAGO VALIDADO POR ADMINISTRACIÓN**\n\n"
-                    f"📄 **Folio:** {folio_admin}\n"
-                    f"Su permiso ha sido validado por administración.\n"
-                    f"El documento está completamente activo para circular.\n\n"
-                    f"Gracias por utilizar el Sistema Digital EDOMEX.",
-                    parse_mode="Markdown"
+                    f"✅ PAGO VALIDADO POR ADMINISTRACIÓN - EDOMEX\n"
+                    f"Folio: {folio_admin}\n"
+                    f"Tu permiso está activo para circular."
                 )
             except Exception as e:
                 print(f"Error notificando al usuario {user_con_folio}: {e}")
         else:
             await message.answer(
-                f"❌ **ERROR: TIMER NO ENCONTRADO**\n\n"
-                f"📄 **Folio:** {folio_admin}\n"
-                f"⚠️ No se encontró ningún timer activo para este folio.\n\n"
-                f"**Posibles causas:**\n"
-                f"• El timer ya expiró automáticamente\n"
-                f"• El usuario ya envió comprobante\n"
-                f"• El folio no existe o es incorrecto\n"
-                f"• El folio ya fue validado anteriormente",
-                parse_mode="Markdown"
+                f"❌ FOLIO NO LOCALIZADO EN TIMERS ACTIVOS\n"
+                f"Folio consultado: {folio_admin}"
             )
     else:
         await message.answer(
-            "⚠️ **FORMATO INCORRECTO**\n\n"
+            "⚠️ FORMATO INCORRECTO\n\n"
             "Use el formato: SERO[número de folio]\n"
-            "Ejemplo: SERO3312",
-            parse_mode="Markdown"
+            "Ejemplo: SERO3312"
         )
 
-# Handler para recibir comprobantes de pago (MEJORADO PARA MÚLTIPLES FOLIOS)
 @dp.message(lambda message: message.content_type == ContentType.PHOTO)
 async def recibir_comprobante(message: types.Message):
     user_id = message.from_user.id
@@ -756,30 +646,25 @@ async def recibir_comprobante(message: types.Message):
     if not folios_usuario:
         await message.answer(
             "ℹ️ No se encontró ningún permiso pendiente de pago.\n\n"
-            "Si desea tramitar un nuevo permiso, use /permiso"
+            "Si desea tramitar un nuevo permiso, use /chuleta"
         )
         return
     
-    # Si tiene varios folios, preguntar cuál
     if len(folios_usuario) > 1:
         lista_folios = '\n'.join([f"• {folio}" for folio in folios_usuario])
         await message.answer(
-            f"📄 **MÚLTIPLES FOLIOS ACTIVOS**\n\n"
+            f"📄 MÚLTIPLES FOLIOS ACTIVOS\n\n"
             f"Tienes {len(folios_usuario)} folios pendientes de pago:\n\n"
             f"{lista_folios}\n\n"
-            f"Por favor, responda con el **NÚMERO DE FOLIO** al que corresponde este comprobante.\n"
-            f"Ejemplo: {folios_usuario[0]}",
-            parse_mode="Markdown"
+            f"Por favor, responda con el NÚMERO DE FOLIO al que corresponde este comprobante.\n"
+            f"Ejemplo: {folios_usuario[0]}"
         )
         return
     
-    # Solo un folio activo, procesar automáticamente
     folio = folios_usuario[0]
     
-    # Cancelar timer específico del folio
     cancelar_timer_folio(folio)
     
-    # Actualizar estado en base de datos
     supabase.table("folios_registrados").update({
         "estado": "COMPROBANTE_ENVIADO",
         "fecha_comprobante": datetime.now().isoformat()
@@ -791,17 +676,15 @@ async def recibir_comprobante(message: types.Message):
     }).eq("folio", folio).execute()
     
     await message.answer(
-        f"✅ **COMPROBANTE RECIBIDO CORRECTAMENTE**\n\n"
-        f"📄 **Folio:** {folio}\n"
+        f"✅ COMPROBANTE RECIBIDO CORRECTAMENTE\n\n"
+        f"📄 Folio: {folio}\n"
         f"📸 Gracias por la imagen, este comprobante será revisado por un segundo filtro de verificación\n"
-        f"⏰ **Timer específico del folio detenido exitosamente**\n\n"
+        f"⏰ Timer específico del folio detenido exitosamente\n\n"
         f"🔍 Su comprobante está siendo verificado por nuestro equipo especializado.\n"
         f"Una vez validado el pago, su permiso quedará completamente activo.\n\n"
-        f"Agradecemos su confianza en el Sistema Digital EDOMEX.",
-        parse_mode="Markdown"
+        f"📋 Para generar otro permiso use /chuleta"
     )
 
-# Comando para ver folios activos
 @dp.message(Command("folios"))
 async def ver_folios_activos(message: types.Message):
     user_id = message.from_user.id
@@ -809,17 +692,16 @@ async def ver_folios_activos(message: types.Message):
     
     if not folios_usuario:
         await message.answer(
-            "ℹ️ **NO HAY FOLIOS ACTIVOS**\n\n"
+            "ℹ️ NO HAY FOLIOS ACTIVOS\n\n"
             "No tienes folios pendientes de pago en este momento.\n\n"
-            "Para crear un nuevo permiso utilice /permiso",
-            parse_mode="Markdown"
+            "Para crear un nuevo permiso utilice /chuleta"
         )
         return
     
     lista_folios = []
     for folio in folios_usuario:
         if folio in timers_activos:
-            tiempo_restante = 720 - int((datetime.now() - timers_activos[folio]["start_time"]).total_seconds() / 60)  # 12 horas = 720 minutos
+            tiempo_restante = 2160 - int((datetime.now() - timers_activos[folio]["start_time"]).total_seconds() / 60)
             tiempo_restante = max(0, tiempo_restante)
             horas = tiempo_restante // 60
             minutos = tiempo_restante % 60
@@ -829,34 +711,31 @@ async def ver_folios_activos(message: types.Message):
             lista_folios.append(f"• {folio} (sin timer)")
     
     await message.answer(
-        f"📋 **SUS FOLIOS ACTIVOS ({len(folios_usuario)})**\n\n"
+        f"📋 SUS FOLIOS ACTIVOS ({len(folios_usuario)})\n\n"
         + '\n'.join(lista_folios) +
-        f"\n\n⏰ Cada folio tiene su propio timer independiente de **12 horas**.\n"
-        f"📸 Para enviar comprobante, use una imagen.",
-        parse_mode="Markdown"
+        f"\n\n⏰ Cada folio tiene su propio timer independiente de 36 horas.\n"
+        f"📸 Para enviar comprobante, use una imagen."
     )
 
-# Handler para preguntas sobre costo/precio/depósito
 @dp.message(lambda message: message.text and any(palabra in message.text.lower() for palabra in [
     'costo', 'precio', 'cuanto', 'cuánto', 'deposito', 'depósito', 'pago', 'valor', 'monto'
 ]))
 async def responder_costo(message: types.Message):
     await message.answer(
-        f"💰 **INFORMACIÓN DE COSTO**\n\n"
-        f"El costo del permiso es **${PRECIO_PERMISO} MXN**.\n\n"
-        "Para iniciar su trámite use /permiso",
-        parse_mode="Markdown"
+        f"💰 INFORMACIÓN DE COSTO\n\n"
+        f"El costo del permiso es ${PRECIO_PERMISO} MXN.\n\n"
+        "Para iniciar su trámite use /chuleta"
     )
 
 @dp.message()
 async def fallback(message: types.Message):
     respuestas_elegantes = [
-        "🏛️ **Sistema Digital EDOMEX.** Para tramitar su permiso utilice /permiso",
-        "📋 **Servicio automatizado.** Comando disponible: /permiso para iniciar trámite",
-        "⚡ **Sistema en línea.** Use /permiso para generar su documento oficial",
-        "🚗 **Plataforma de permisos EDOMEX.** Inicie su proceso con /permiso"
+        "🏛️ Sistema Digital EDOMEX.",
+        "📋 Servicio automatizado.",
+        "⚡ Sistema en línea.",
+        "🚗 Plataforma de permisos EDOMEX."
     ]
-    await message.answer(random.choice(respuestas_elegantes), parse_mode="Markdown")
+    await message.answer(random.choice(respuestas_elegantes))
 
 # ------------ FASTAPI + LIFESPAN ------------
 _keep_task = None
@@ -864,13 +743,12 @@ _keep_task = None
 async def keep_alive():
     """Mantiene el bot activo con pings periódicos"""
     while True:
-        await asyncio.sleep(600)  # 10 minutos
+        await asyncio.sleep(600)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _keep_task
     
-    # Configurar webhook
     await bot.delete_webhook(drop_pending_updates=True)
     if BASE_URL:
         webhook_url = f"{BASE_URL}/webhook"
@@ -882,27 +760,27 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Cleanup
     if _keep_task:
         _keep_task.cancel()
         with suppress(asyncio.CancelledError):
             await _keep_task
     await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Bot Permisos Estado de México", version="2.0.0")
+app = FastAPI(lifespan=lifespan, title="Bot Permisos Estado de México", version="3.0.0")
 
 @app.get("/")
 async def health():
     return {
         "status": "running",
         "bot": "Estado de México Permisos",
-        "version": "2.0.0 - Sistema Mejorado",
+        "version": "3.0.0 - Timer 36h + SERO + /chuleta",
         "webhook_configured": bool(BASE_URL),
         "documentos_generados": 2,
         "timers_activos": len(timers_activos),
-        "sistema": "Timers independientes por folio + QR dinámico",
+        "sistema": "Timers independientes 36h por folio + QR dinámico",
         "prefijo_folio": "331",
-        "timer_duracion": "12 horas"
+        "timer_duracion": "36 horas",
+        "comando_secreto": "/chuleta (invisible)"
     }
 
 @app.post("/webhook")
@@ -925,11 +803,11 @@ async def bot_status():
             "bot_username": bot_info.username,
             "bot_id": bot_info.id,
             "pdfs_por_permiso": 2,
-            "timers_sistema": "Independientes por folio - 12 horas",
-            "codigo_admin": "SERO + folio",
+            "timers_sistema": "Independientes por folio - 36 horas",
+            "codigo_admin": "SERO + folio (ej: SERO3312)",
             "qr_dinamico": True,
             "prefijo_edomex": "331",
-            "recordatorios": "2h antes, 1h antes, 30min, 10min"
+            "recordatorios": "90/60/30/10 min antes"
         }
     except Exception as e:
         return {"bot_active": False, "error": str(e)}
