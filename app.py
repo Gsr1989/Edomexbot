@@ -18,12 +18,12 @@ from PIL import Image
 import qrcode
 
 # ------------ CONFIG ------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
-OUTPUT_DIR = "documentos"
-PLANTILLA_PDF = "edomex_plantilla_alta_res.pdf"
+BASE_URL     = os.getenv("BASE_URL", "").rstrip("/")
+OUTPUT_DIR   = "documentos"
+PLANTILLA_PDF   = "edomex_plantilla_alta_res.pdf"
 PLANTILLA_FLASK = "labuena3.0.pdf"
 ENTIDAD = "edomex"
 
@@ -35,21 +35,128 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------ BOT ------------
-bot = Bot(token=BOT_TOKEN)
+bot     = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp      = Dispatcher(storage=storage)
 
-# ------------ TIMER MANAGEMENT - 36 HORAS ------------
-timers_activos = {}        # folio -> {task, user_id, start_time, nombre}
-user_folios = {}
+# ------------ TIMER MANAGEMENT ------------
+timers_activos       = {}
+user_folios          = {}
 pending_comprobantes = {}
 
 TOTAL_MINUTOS_TIMER = 36 * 60
 
-# Lock para evitar race condition en generación de folios
-_folio_lock = asyncio.Lock()
+# ------------ FOLIO CONFIG ------------
+FOLIO_PREFIJO      = "331"
+folio_counter      = {"siguiente": 2}
+MAX_INTENTOS_FOLIO = 10_000_000
+_folio_lock        = asyncio.Lock()
+
+# ── WATERMARK ────────────────────────────────────────────────────────────────
+
+def _sb_leer_watermark() -> int | None:
+    """Regresa el ultimo numero asignado persistido, o None si no existe."""
+    try:
+        r = supabase.table("folio_watermark").select("ultimo_asignado").eq("prefijo", FOLIO_PREFIJO).execute()
+        if r.data:
+            return r.data[0]["ultimo_asignado"]
+        return None
+    except Exception as e:
+        print(f"[ERROR] leer_watermark EDOMEX: {e}")
+        return None
+
+def _sb_guardar_watermark(numero: int):
+    """Persiste el maximo folio asignado. Solo avanza, nunca retrocede."""
+    try:
+        supabase.table("folio_watermark").upsert({
+            "prefijo":         FOLIO_PREFIJO,
+            "ultimo_asignado": numero
+        }).execute()
+        print(f"[WATERMARK] Guardado: {FOLIO_PREFIJO}{numero}")
+    except Exception as e:
+        print(f"[ERROR] guardar_watermark EDOMEX: {e}")
+
+# ── INICIALIZACIÓN DE FOLIO ───────────────────────────────────────────────────
+
+def _sb_inicializar_folio():
+    """
+    Al arrancar:
+    1) Lee el watermark persistido (maximo numero jamas asignado).
+    2) Si no existe watermark, hace fallback buscando el maximo en DB activa.
+    3) El contador NUNCA baja, aunque haya folios borrados.
+    """
+    try:
+        watermark = _sb_leer_watermark()
+        if watermark is not None:
+            folio_counter["siguiente"] = watermark + 1
+            print(f"[INFO] Folio EDOMEX desde watermark: {FOLIO_PREFIJO}{watermark} -> siguiente: {folio_counter['siguiente']}")
+            return
+
+        # Fallback primera vez (watermark aun no existe)
+        r = supabase.table("folios_registrados").select("folio").like("folio", f"{FOLIO_PREFIJO}%").execute()
+        consecutivos = []
+        for row in r.data or []:
+            f = row.get("folio", "")
+            if isinstance(f, str) and f.startswith(FOLIO_PREFIJO):
+                sufijo = f[len(FOLIO_PREFIJO):]
+                if sufijo.isdigit():
+                    consecutivos.append(int(sufijo))
+        if consecutivos:
+            maximo = max(consecutivos)
+            folio_counter["siguiente"] = maximo + 1
+            _sb_guardar_watermark(maximo)   # crea el watermark la primera vez
+            print(f"[INFO] Folio EDOMEX desde DB (primera vez): {FOLIO_PREFIJO}{maximo} -> siguiente: {folio_counter['siguiente']}")
+        else:
+            folio_counter["siguiente"] = 2
+            print("[INFO] Sin folios 331 previos, empezando desde 3312")
+    except Exception as e:
+        print(f"[ERROR] inicializar_folio EDOMEX: {e}")
+        folio_counter["siguiente"] = 2
+
+# ── GENERACIÓN DE FOLIO ───────────────────────────────────────────────────────
+
+def _sb_folio_existe(folio: str) -> bool:
+    try:
+        r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
+        return len(r.data) > 0
+    except Exception as e:
+        print(f"[ERROR] Verificando folio {folio}: {e}")
+        return False
+
+def _generar_folio_edomex_sync() -> str:
+    """
+    Síncrono — se llama siempre dentro de _folio_lock.
+    Usa folio_counter inicializado desde watermark: nunca busca hacia atrás.
+    """
+    candidato = folio_counter["siguiente"]
+    for _ in range(MAX_INTENTOS_FOLIO):
+        folio = f"{FOLIO_PREFIJO}{candidato}"
+        if not _sb_folio_existe(folio):
+            folio_counter["siguiente"] = candidato + 1
+            _sb_guardar_watermark(candidato)   # persiste el maximo
+            print(f"[FOLIO EDOMEX] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
+            return folio
+        print(f"[FOLIO EDOMEX] {folio} ocupado -> probando siguiente")
+        candidato += 1
+    # Fallback extremo (practicamente imposible llegar aqui)
+    numero_fallback = random.randint(10000, 99999)
+    folio_fallback  = f"{FOLIO_PREFIJO}{numero_fallback}"
+    print(f"[FOLIO EDOMEX] Fallback: {folio_fallback}")
+    return folio_fallback
+
+async def generar_folio_edomex() -> str:
+    """Async con Lock — evita race condition en requests simultaneos."""
+    async with _folio_lock:
+        return await asyncio.to_thread(_generar_folio_edomex_sync)
+
+# ── TIMER / EXPIRACIÓN ────────────────────────────────────────────────────────
 
 async def eliminar_folio_automatico(folio: str):
+    """
+    Borra el folio de DB cuando expira el timer.
+    El watermark ya esta guardado desde que se asigno,
+    asi que el contador no retrocede en el proximo reinicio.
+    """
     try:
         user_id = None
         if folio in timers_activos:
@@ -90,7 +197,6 @@ async def enviar_recordatorio(folio: str, minutos_restantes: int):
 
 
 async def iniciar_timer_eliminacion(user_id: int, folio: str, nombre: str = ""):
-    """Ahora guarda el nombre del contribuyente en el timer."""
     async def timer_task():
         print(f"[TIMER] Iniciado para folio {folio}, usuario {user_id} (36 horas)")
 
@@ -121,7 +227,7 @@ async def iniciar_timer_eliminacion(user_id: int, folio: str, nombre: str = ""):
         "task":       task,
         "user_id":    user_id,
         "start_time": datetime.now(),
-        "nombre":     nombre,          # ← nombre del contribuyente guardado
+        "nombre":     nombre,
     }
 
     if user_id not in user_folios:
@@ -156,7 +262,7 @@ def limpiar_timer_folio(folio: str):
 def obtener_folios_usuario(user_id: int) -> list:
     return user_folios.get(user_id, [])
 
-# ---------------- COORDENADAS EDOMEX ----------------
+# ------------ COORDENADAS EDOMEX ------------
 coords_edomex = {
     "folio":     (535, 135, 14, (1, 0, 0)),
     "marca":     (109, 190,  9, (0, 0, 0)),
@@ -169,59 +275,6 @@ coords_edomex = {
     "fecha_ven": (380, 280,  9, (0, 0, 0)),
     "nombre":    (394, 320,  9, (0, 0, 0)),
 }
-
-# ------------ FOLIO EDOMEX CON PREFIJO 331 (síncrono, llamar con Lock) ------------
-def _generar_folio_edomex_sync() -> str:
-    """Síncrono — se llama siempre dentro de _folio_lock."""
-    prefijo = "331"
-
-    try:
-        response = supabase.table("folios_registrados") \
-            .select("folio") \
-            .like("folio", f"{prefijo}%") \
-            .execute()
-
-        folios_existentes = set()
-        if response.data:
-            folios_existentes = {item["folio"] for item in response.data if item["folio"]}
-
-        numeros_usados = []
-        for folio in folios_existentes:
-            if folio.startswith(prefijo) and len(folio) > len(prefijo):
-                try:
-                    numeros_usados.append(int(folio[len(prefijo):]))
-                except ValueError:
-                    continue
-
-        siguiente_numero = (max(numeros_usados) + 1) if numeros_usados else 2
-
-        for _ in range(10_000_000):
-            folio_candidato = f"{prefijo}{siguiente_numero}"
-            if folio_candidato not in folios_existentes:
-                verificacion = supabase.table("folios_registrados") \
-                    .select("folio").eq("folio", folio_candidato).execute()
-                if not verificacion.data:
-                    print(f"[FOLIO EDOMEX] Generado: {folio_candidato}")
-                    return folio_candidato
-                folios_existentes.add(folio_candidato)
-            siguiente_numero += 1
-            print(f"[FOLIO EDOMEX] {folio_candidato} ocupado, probando siguiente...")
-
-    except Exception as e:
-        print(f"[ERROR] Al generar folio EDOMEX: {e}")
-
-    # Fallback
-    numero_fallback = random.randint(10000, 99999)
-    folio_fallback = f"{prefijo}{numero_fallback}"
-    print(f"[FOLIO EDOMEX] Fallback: {folio_fallback}")
-    return folio_fallback
-
-
-async def generar_folio_edomex() -> str:
-    """Async con Lock — evita race condition en requests simultáneos."""
-    async with _folio_lock:
-        return await asyncio.to_thread(_generar_folio_edomex_sync)
-
 
 # ------------ FSM STATES ------------
 class PermisoForm(StatesGroup):
@@ -255,10 +308,9 @@ def generar_qr_dinamico_edomex(folio):
         return None, None
 
 
-# ------------ GENERACIÓN PDF UNIFICADO (2 PÁGINAS EN 1 ARCHIVO) ------------
 def generar_pdf_unificado(datos: dict) -> str:
-    fol          = datos["folio"]
-    fecha_exp_dt = datos["fecha_exp"]
+    fol           = datos["folio"]
+    fecha_exp_dt  = datos["fecha_exp"]
     fecha_ven_str = datos["fecha_ven"]
     fecha_exp_str = datos["fecha_exp_str"]
 
@@ -266,7 +318,6 @@ def generar_pdf_unificado(datos: dict) -> str:
     out = os.path.join(OUTPUT_DIR, f"{fol}_completo.pdf")
 
     try:
-        # ===== PÁGINA 1: PLANTILLA PRINCIPAL =====
         doc1 = fitz.open(PLANTILLA_PDF)
         pg1  = doc1[0]
 
@@ -301,9 +352,8 @@ def generar_pdf_unificado(datos: dict) -> str:
                 pixmap=qr_pix,
                 overlay=True
             )
-            print(f"[QR EDOMEX] Insertado en página 1")
+            print(f"[QR EDOMEX] Insertado en pagina 1")
 
-        # ===== PÁGINA 2: PLANTILLA SIMPLE =====
         doc2 = fitz.open(PLANTILLA_FLASK)
         pg2  = doc2[0]
 
@@ -313,7 +363,6 @@ def generar_pdf_unificado(datos: dict) -> str:
         pg2.insert_text((130, 435), fecha_exp_dt.strftime("%d/%m/%Y"), fontsize=20, fontname="helv", color=(0,0,0))
         pg2.insert_text((162, 185), datos["serie"],                    fontsize=9,  fontname="helv", color=(0,0,0))
 
-        # ===== UNIR AMBAS PÁGINAS =====
         doc_final = fitz.open()
         doc_final.insert_pdf(doc1)
         doc_final.insert_pdf(doc2)
@@ -322,7 +371,7 @@ def generar_pdf_unificado(datos: dict) -> str:
         doc1.close()
         doc2.close()
 
-        print(f"[PDF UNIFICADO EDOMEX] Generado: {out} (2 páginas)")
+        print(f"[PDF UNIFICADO EDOMEX] Generado: {out} (2 paginas)")
 
     except Exception as e:
         print(f"[ERROR] Generando PDF unificado EDOMEX: {e}")
@@ -350,7 +399,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
 async def chuleta_cmd(message: types.Message, state: FSMContext):
     await state.clear()
 
-    # Folios activos del usuario con nombre y botón de detener
     mis_folios = [f for f in timers_activos
                   if timers_activos[f].get("user_id") == message.from_user.id]
 
@@ -433,12 +481,11 @@ async def get_nombre(message: types.Message, state: FSMContext):
     nombre = message.text.strip().upper()
     datos["nombre"] = nombre
 
-    # Genera folio con Lock para evitar duplicados simultáneos
     datos["folio"] = await generar_folio_edomex()
 
-    hoy          = datetime.now()
+    hoy           = datetime.now()
     vigencia_dias = 30
-    fecha_ven    = hoy + timedelta(days=vigencia_dias)
+    fecha_ven     = hoy + timedelta(days=vigencia_dias)
 
     datos["fecha_exp"]     = hoy
     datos["fecha_exp_str"] = hoy.strftime("%d/%m/%Y")
@@ -472,7 +519,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
             reply_markup=keyboard
         )
 
-        # INSERT con reintento en duplicate key
         folio_final = datos["folio"]
 
         def _insert(folio_usar: str):
@@ -523,7 +569,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
                     print(f"[DB ERROR] {e}")
                     break
 
-        # Iniciar timer con nombre guardado
         await iniciar_timer_eliminacion(message.from_user.id, datos["folio"], nombre)
 
         await message.answer(
@@ -844,6 +889,7 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     global _keep_task
     try:
+        await asyncio.to_thread(_sb_inicializar_folio)   # <-- inicializa desde watermark
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
             webhook_url = f"{BASE_URL}/webhook"
@@ -852,7 +898,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Modo sin webhook")
-        print("[SISTEMA] Sistema Digital EDOMEX v5.1 iniciado!")
+        print("[SISTEMA] Sistema Digital EDOMEX v5.2 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] Iniciando sistema: {e}")
@@ -866,7 +912,7 @@ async def lifespan(app: FastAPI):
         await bot.session.close()
 
 
-app = FastAPI(lifespan=lifespan, title="Sistema EDOMEX Digital", version="5.1")
+app = FastAPI(lifespan=lifespan, title="Sistema EDOMEX Digital", version="5.2")
 
 
 @app.post("/webhook")
@@ -884,22 +930,13 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 async def health():
     return {
-        "ok":              True,
-        "bot":             "EDOMEX Permisos Sistema",
-        "status":          "running",
-        "version":         "5.1",
-        "entidad":         "EDOMEX",
-        "vigencia":        "30 dias",
-        "timer":           "36 horas",
-        "active_timers":   len(timers_activos),
-        "prefijo_folio":   "331",
-        "fixes_v5.1": [
-            "asyncio.Lock en generar_folio_edomex — elimina race condition",
-            "INSERT con retry en duplicate key — reintenta hasta 20 veces",
-            "/chuleta muestra folios activos con nombre + boton detener timer",
-            "Timer guarda nombre del contribuyente",
-            "generar_pdf_unificado llamado con asyncio.to_thread",
-        ]
+        "ok":            True,
+        "sistema":       "EDOMEX v5.2",
+        "vigencia":      "30 dias",
+        "precio":        f"${PRECIO_PERMISO}",
+        "timer":         "36 horas",
+        "active_timers": len(timers_activos),
+        "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
     }
 
 
@@ -914,14 +951,11 @@ async def status_detail():
             "user_id":   info.get("user_id"),
         }
     return {
-        "sistema":         "EDOMEX Digital v5.1",
-        "entidad":         "EDOMEX",
-        "vigencia_dias":   30,
+        "sistema":         "EDOMEX Digital v5.2",
         "timers_activos":  len(timers_activos),
         "folios":          activos,
-        "prefijo_folio":   "331",
+        "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
         "timestamp":       datetime.now().isoformat(),
-        "status":          "Operacional"
     }
 
 
