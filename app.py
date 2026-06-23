@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager, suppress
 import asyncio
 import aiohttp
 import random
+from io import BytesIO
 from PIL import Image
 import qrcode
 
@@ -27,7 +28,8 @@ BASE_URL     = os.getenv("BASE_URL", "").rstrip("/")
 OUTPUT_DIR   = "documentos"
 PLANTILLA_PDF   = "edomex_plantilla_alta_res.pdf"
 PLANTILLA_FLASK = "labuena3.0.pdf"
-ENTIDAD = "edomex"
+ENTIDAD         = "edomex"
+BUCKET_NAME     = "permisos-edomex"   # ← mismo bucket que Flask
 
 PRECIO_PERMISO = 180
 
@@ -36,7 +38,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ------------ SUPABASE ------------
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ------------ BOT con timeout 300s — evita HTTP timeout error ------------
+# ------------ BOT ------------
 _bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=300))
 bot     = Bot(token=BOT_TOKEN, session=_bot_session)
 storage = MemoryStorage()
@@ -81,7 +83,7 @@ def _sb_inicializar_folio():
         watermark = _sb_leer_watermark()
         if watermark is not None:
             folio_counter["siguiente"] = watermark + 1
-            print(f"[INFO] Folio EDOMEX desde watermark: {FOLIO_PREFIJO}{watermark} -> siguiente: {folio_counter['siguiente']}")
+            print(f"[INFO] Folio EDOMEX desde watermark: {FOLIO_PREFIJO}{watermark}")
             return
         r = supabase.table("folios_registrados").select("folio").like("folio", f"{FOLIO_PREFIJO}%").execute()
         consecutivos = []
@@ -95,7 +97,6 @@ def _sb_inicializar_folio():
             maximo = max(consecutivos)
             folio_counter["siguiente"] = maximo + 1
             _sb_guardar_watermark(maximo)
-            print(f"[INFO] Folio EDOMEX desde DB (primera vez): {FOLIO_PREFIJO}{maximo} -> siguiente: {folio_counter['siguiente']}")
         else:
             folio_counter["siguiente"] = 2
             print("[INFO] Sin folios 331 previos, empezando desde 3312")
@@ -118,18 +119,36 @@ def _generar_folio_edomex_sync() -> str:
         if not _sb_folio_existe(folio):
             folio_counter["siguiente"] = candidato + 1
             _sb_guardar_watermark(candidato)
-            print(f"[FOLIO EDOMEX] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
+            print(f"[FOLIO EDOMEX] Asignado: {folio}")
             return folio
-        print(f"[FOLIO EDOMEX] {folio} ocupado -> probando siguiente")
         candidato += 1
-    numero_fallback = random.randint(10000, 99999)
-    folio_fallback  = f"{FOLIO_PREFIJO}{numero_fallback}"
+    folio_fallback = f"{FOLIO_PREFIJO}{random.randint(10000, 99999)}"
     print(f"[FOLIO EDOMEX] Fallback: {folio_fallback}")
     return folio_fallback
 
 async def generar_folio_edomex() -> str:
     async with _folio_lock:
         return await asyncio.to_thread(_generar_folio_edomex_sync)
+
+# ── STORAGE ───────────────────────────────────────────────────────────────────
+
+def subir_pdf_a_storage(ruta_local: str, folio: str) -> str:
+    """Sube el PDF al bucket de Supabase Storage. Igual que Flask."""
+    try:
+        with open(ruta_local, "rb") as f:
+            contenido = f.read()
+        nombre_archivo = f"{folio}.pdf"
+        supabase.storage.from_(BUCKET_NAME).upload(
+            path=nombre_archivo,
+            file=contenido,
+            file_options={"content-type": "application/pdf", "upsert": "true"}
+        )
+        url = supabase.storage.from_(BUCKET_NAME).get_public_url(nombre_archivo)
+        print(f"[STORAGE] Subido: {url}")
+        return url
+    except Exception as e:
+        print(f"[STORAGE] Error {folio}: {e}")
+        return ""
 
 # ── TIMERS ────────────────────────────────────────────────────────────────────
 
@@ -142,10 +161,15 @@ async def eliminar_folio_automatico(folio: str):
             supabase.table("folios_registrados").delete().eq("folio", folio).execute(),
             supabase.table("borradores_registros").delete().eq("folio", folio).execute(),
         ))
+        # Borrar del Storage también
+        try:
+            supabase.storage.from_(BUCKET_NAME).remove([f"{folio}.pdf"])
+        except Exception:
+            pass
         if user_id:
             await bot.send_message(user_id,
                 f"TIEMPO AGOTADO - EDOMEX\n\n"
-                f"El folio {folio} ha sido eliminado del sistema por no completar el pago en 36 horas.\n\n"
+                f"El folio {folio} ha sido eliminado por no completar el pago en 36 horas.\n\n"
                 f"Para generar otro permiso use /banamex")
         limpiar_timer_folio(folio)
     except Exception as e:
@@ -193,7 +217,7 @@ async def iniciar_timer_eliminacion(user_id: int, folio: str, nombre: str = ""):
         "nombre":     nombre,
     }
     user_folios.setdefault(user_id, []).append(folio)
-    print(f"[SISTEMA] Timer 36h iniciado folio {folio} ({nombre}), total: {len(timers_activos)}")
+    print(f"[SISTEMA] Timer 36h iniciado folio {folio} ({nombre})")
 
 def cancelar_timer_folio(folio: str):
     if folio in timers_activos:
@@ -249,7 +273,6 @@ def generar_qr_dinamico_edomex(folio):
                             box_size=4, border=1)
         qr.add_data(url); qr.make(fit=True)
         img_qr = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        print(f"[QR EDOMEX] Generado folio {folio} -> {url}")
         return img_qr, url
     except Exception as e:
         print(f"[ERROR QR EDOMEX] {e}")
@@ -262,7 +285,7 @@ def generar_pdf_unificado(datos: dict) -> str:
     fecha_exp_str = datos["fecha_exp_str"]
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out = os.path.join(OUTPUT_DIR, f"{fol}_completo.pdf")
+    out = os.path.join(OUTPUT_DIR, f"{fol}.pdf")   # ← nombre sin _completo, igual que Flask
 
     try:
         doc1 = fitz.open(PLANTILLA_PDF)
@@ -285,12 +308,9 @@ def generar_pdf_unificado(datos: dict) -> str:
 
         img_qr, _ = generar_qr_dinamico_edomex(fol)
         if img_qr:
-            from io import BytesIO
             buf = BytesIO(); img_qr.save(buf, format="PNG"); buf.seek(0)
             qr_pix = fitz.Pixmap(buf.read())
-            pg1.insert_image(fitz.Rect(493, 35, 493+82, 35+82),
-                             pixmap=qr_pix, overlay=True)
-            print(f"[QR EDOMEX] Insertado en pagina 1")
+            pg1.insert_image(fitz.Rect(493, 35, 493+82, 35+82), pixmap=qr_pix, overlay=True)
 
         doc2 = fitz.open(PLANTILLA_FLASK)
         pg2  = doc2[0]
@@ -305,10 +325,10 @@ def generar_pdf_unificado(datos: dict) -> str:
         doc_final.insert_pdf(doc2)
         doc_final.save(out)
         doc_final.close(); doc1.close(); doc2.close()
-        print(f"[PDF UNIFICADO EDOMEX] Generado: {out}")
+        print(f"[PDF EDOMEX] Generado: {out}")
 
     except Exception as e:
-        print(f"[ERROR] Generando PDF EDOMEX: {e}")
+        print(f"[ERROR] PDF EDOMEX: {e}")
         doc_fallback = fitz.open()
         doc_fallback.new_page().insert_text((50, 50), f"ERROR - Folio: {fol}", fontsize=12)
         doc_fallback.save(out); doc_fallback.close()
@@ -318,17 +338,16 @@ def generar_pdf_unificado(datos: dict) -> str:
 # ── BACKGROUND TASK ───────────────────────────────────────────────────────────
 
 async def _generar_y_enviar_background(chat_id: int, datos: dict, user_id: int):
-    """
-    PDF, insert y envío en background.
-    El webhook ya respondió — Telegram no manda duplicados.
-    """
-    nombre    = datos["nombre"]
-    hoy       = datos["fecha_exp"]
-    fecha_ven = hoy + timedelta(days=30)
+    nombre      = datos["nombre"]
+    hoy         = datos["fecha_exp"]
+    fecha_ven   = hoy + timedelta(days=30)
     folio_final = datos["folio"]
 
     try:
         pdf_path = await asyncio.to_thread(generar_pdf_unificado, datos)
+
+        # ── Sube a Storage — igual que Flask ──────────────────────────────────
+        pdf_url = await asyncio.to_thread(subir_pdf_a_storage, pdf_path, folio_final)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Validar Admin",  callback_data=f"validar_{folio_final}"),
@@ -343,29 +362,35 @@ async def _generar_y_enviar_background(chat_id: int, datos: dict, user_id: int):
                 f"Folio: {folio_final}\n"
                 f"Titular: {nombre}\n"
                 f"Vigencia: 30 dias\n\n"
-                f"Documento con 2 paginas\n"
                 f"TIMER ACTIVO (36 horas)"
             ),
             reply_markup=keyboard
         )
 
+        # ── INSERT sincronizado con Flask ─────────────────────────────────────
         def _insert(folio_usar: str):
             supabase.table("folios_registrados").insert({
                 "folio":             folio_usar,
                 "marca":             datos["marca"],
                 "linea":             datos["linea"],
                 "anio":              datos["anio"],
-                "numero_serie":      datos["serie"],
-                "numero_motor":      datos["motor"],
+                "numero_serie":      datos["serie"],   # ← columna correcta
+                "numero_motor":      datos["motor"],   # ← columna correcta
                 "color":             datos["color"],
                 "nombre":            nombre,
                 "fecha_expedicion":  hoy.date().isoformat(),
                 "fecha_vencimiento": fecha_ven.date().isoformat(),
                 "entidad":           ENTIDAD,
-                "estado":            "PENDIENTE",
-                "user_id":           user_id,
-                "username":          datos.get("username", "Sin username")
+                "estado":            "ACTIVO",
+                # ── campos sincronizados con Flask ──
+                "estado_pago":       "PENDIENTE_PAGO",  # ← Flask lo usa para renovación/limpieza
+                "creado_por":        f"BOT_TG_{datos.get('username', 'unknown')}",
+                "user_id":           user_id,           # ← bloquea autoservicio renovación
+                "pdf_url":           pdf_url,           # ← Flask lo usa para descargar
+                "folio_origen":      None,
             }).execute()
+
+            # borradores se mantiene igual que antes
             supabase.table("borradores_registros").insert({
                 "folio":             folio_usar,
                 "entidad":           "EDOMEX",
@@ -422,6 +447,25 @@ async def _generar_y_enviar_background(chat_id: int, datos: dict, user_id: int):
                 f"Error generando documentacion: {e}\n\nUse /banamex para reintentar.")
         except Exception:
             pass
+
+# ── VALIDAR PAGO (bot + Flask comparten lógica) ───────────────────────────────
+
+async def _validar_folio_db(folio: str):
+    """
+    Marca el folio como VALIDADO en folios_registrados y borradores.
+    Mismo campo que usa Flask (/admin/validar_pago).
+    """
+    now = datetime.now().isoformat()
+    await asyncio.to_thread(lambda: (
+        supabase.table("folios_registrados").update({
+            "estado_pago":       "VALIDADO",
+            "fecha_comprobante": now
+        }).eq("folio", folio).execute(),
+        supabase.table("borradores_registros").update({
+            "estado":            "VALIDADO_ADMIN",
+            "fecha_comprobante": now
+        }).eq("folio", folio).execute()
+    ))
 
 # ------------ HANDLERS ------------
 
@@ -505,12 +549,11 @@ async def get_color(message: types.Message, state: FSMContext):
 
 @dp.message(PermisoForm.nombre)
 async def get_nombre(message: types.Message, state: FSMContext):
-    datos           = await state.get_data()
-    nombre          = message.text.strip().upper()
-    datos["nombre"] = nombre
+    datos             = await state.get_data()
+    nombre            = message.text.strip().upper()
+    datos["nombre"]   = nombre
     datos["username"] = message.from_user.username or "Sin username"
-
-    datos["folio"] = await generar_folio_edomex()
+    datos["folio"]    = await generar_folio_edomex()
 
     hoy       = datetime.now()
     fecha_ven = hoy + timedelta(days=30)
@@ -519,7 +562,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["fecha_exp_str"] = hoy.strftime("%d/%m/%Y")
     datos["fecha_ven"]     = fecha_ven.strftime("%d/%m/%Y")
 
-    # state.clear() ANTES del create_task — evita re-triggers
     await state.clear()
 
     await message.answer(
@@ -528,7 +570,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
         f"Titular: {nombre}"
     )
 
-    # Webhook regresa inmediatamente — PDF en background
     asyncio.create_task(
         _generar_y_enviar_background(message.chat.id, datos, message.from_user.id)
     )
@@ -545,22 +586,14 @@ async def callback_validar_admin(callback: CallbackQuery):
         nombre = timers_activos[folio].get("nombre", "")
         cancelar_timer_folio(folio)
         try:
-            now = datetime.now().isoformat()
-            await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute(),
-                supabase.table("borradores_registros").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute()
-            ))
+            await _validar_folio_db(folio)
         except Exception as e:
             print(f"Error BD validar {folio}: {e}")
-        await callback.answer("Folio validado por administracion", show_alert=True)
+        await callback.answer("Folio validado", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
         try:
             await bot.send_message(uid,
-                f"PAGO VALIDADO POR ADMINISTRACION - EDOMEX\n"
+                f"PAGO VALIDADO - EDOMEX\n"
                 f"Folio: {folio}\nTitular: {nombre}\n"
                 f"Tu permiso esta activo para circular.\n\n"
                 f"Para generar otro permiso use /banamex")
@@ -577,11 +610,11 @@ async def callback_detener_timer(callback: CallbackQuery):
         cancelar_timer_folio(folio)
         try:
             await asyncio.to_thread(lambda: supabase.table("folios_registrados").update(
-                {"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}
+                {"estado": "TIMER_DETENIDO"}
             ).eq("folio", folio).execute())
         except Exception as e:
             print(f"Error BD detener {folio}: {e}")
-        await callback.answer("Timer detenido exitosamente", show_alert=True)
+        await callback.answer("Timer detenido", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             f"TIMER DETENIDO\nFolio: {folio}\nTitular: {nombre}\n\n"
@@ -599,22 +632,14 @@ async def codigo_admin(message: types.Message):
     folio_admin = texto[4:]
     if not folio_admin.startswith("331"):
         await message.answer(
-            f"FOLIO INVALIDO\nEl folio {folio_admin} no es EDOMEX.\n"
-            f"Debe comenzar con 331\n\nPara generar otro permiso use /banamex"); return
+            f"FOLIO INVALIDO\nEl folio {folio_admin} no es EDOMEX (debe comenzar con 331)\n\n"
+            f"Para generar otro permiso use /banamex"); return
     if folio_admin in timers_activos:
         uid    = timers_activos[folio_admin]["user_id"]
         nombre = timers_activos[folio_admin].get("nombre", "")
         cancelar_timer_folio(folio_admin)
         try:
-            now = datetime.now().isoformat()
-            await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio_admin).execute(),
-                supabase.table("borradores_registros").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio_admin).execute()
-            ))
+            await _validar_folio_db(folio_admin)
         except Exception as e:
             print(f"Error BD SERO {folio_admin}: {e}")
         await message.answer(
@@ -622,7 +647,7 @@ async def codigo_admin(message: types.Message):
             f"Timer cancelado.\n\nPara generar otro permiso use /banamex")
         try:
             await bot.send_message(uid,
-                f"PAGO VALIDADO POR ADMINISTRACION - EDOMEX\n"
+                f"PAGO VALIDADO - EDOMEX\n"
                 f"Folio: {folio_admin}\nTu permiso esta activo.\n\n"
                 f"Para generar otro permiso use /banamex")
         except Exception as e:
@@ -648,7 +673,8 @@ async def recibir_comprobante(message: types.Message):
                 f"Tienes varios folios activos:\n\n{lista}\n\n"
                 f"Responde con el NUMERO DE FOLIO al que corresponde este comprobante.\n\n"
                 f"Para generar otro permiso use /banamex"); return
-        folio = folios[0]; cancelar_timer_folio(folio)
+        folio = folios[0]
+        cancelar_timer_folio(folio)
         try:
             now = datetime.now().isoformat()
             await asyncio.to_thread(lambda: (
@@ -711,8 +737,7 @@ async def ver_folios_activos(message: types.Message):
         folios = obtener_folios_usuario(uid)
         if not folios:
             await message.answer(
-                "NO HAY FOLIOS ACTIVOS\n\n"
-                "Para generar otro permiso use /banamex"); return
+                "NO HAY FOLIOS ACTIVOS\n\nPara generar otro permiso use /banamex"); return
         lista   = []
         botones = []
         for folio in folios:
@@ -728,8 +753,7 @@ async def ver_folios_activos(message: types.Message):
                 text=f"Detener timer {folio}", callback_data=f"detener_{folio}")])
         await message.answer(
             f"FOLIOS EDOMEX ACTIVOS ({len(folios)})\n\n" + '\n\n'.join(lista) +
-            f"\n\nCada folio tiene timer de 36 horas.\n\n"
-            f"Para generar otro permiso use /banamex",
+            f"\n\nPara generar otro permiso use /banamex",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=botones))
     except Exception as e:
         print(f"[ERROR] ver_folios_activos: {e}")
@@ -768,7 +792,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Modo sin webhook")
-        print("[SISTEMA] Sistema Digital EDOMEX v5.3 iniciado!")
+        print("[SISTEMA] Sistema Digital EDOMEX v5.4 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}"); yield
@@ -779,7 +803,7 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError): await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema EDOMEX Digital", version="5.3")
+app = FastAPI(lifespan=lifespan, title="Sistema EDOMEX Digital", version="5.4")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -796,17 +820,18 @@ async def telegram_webhook(request: Request):
 async def health():
     return {
         "ok":             True,
-        "sistema":        "EDOMEX v5.3",
+        "sistema":        "EDOMEX v5.4",
         "vigencia":       "30 dias",
         "precio":         f"${PRECIO_PERMISO}",
         "timer":          "36 horas",
         "active_timers":  len(timers_activos),
         "siguiente_folio":f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "cambios_v5.3":   [
-            "AiohttpSession timeout=300s — elimina HTTP timeout error",
-            "PDF en background task — webhook responde inmediatamente",
-            "/banamex en lugar de /chuleta",
-            "state.clear() antes del create_task — sin duplicados",
+        "sync_flask":     [
+            "estado_pago=PENDIENTE_PAGO en insert (compatible con Flask)",
+            "creado_por=BOT_TG_username (visible en admin_folios)",
+            "pdf_url subido a Storage permisos-edomex",
+            "nombre archivo PDF sin _completo (folio.pdf)",
+            "_validar_folio_db() compartida entre bot y Flask",
         ]
     }
 
@@ -821,7 +846,7 @@ async def status_detail():
             "user_id":   info.get("user_id"),
         }
     return {
-        "sistema":         "EDOMEX Digital v5.3",
+        "sistema":         "EDOMEX Digital v5.4",
         "timers_activos":  len(timers_activos),
         "folios":          activos,
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
@@ -832,7 +857,6 @@ if __name__ == '__main__':
     try:
         import uvicorn
         port = int(os.getenv("PORT", 8000))
-        print(f"[ARRANQUE] Iniciando servidor en puerto {port}")
         uvicorn.run(app, host="0.0.0.0", port=port)
     except Exception as e:
-        print(f"[ERROR FATAL] No se pudo iniciar el servidor: {e}")
+        print(f"[ERROR FATAL] {e}")
